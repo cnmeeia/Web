@@ -1,4 +1,4 @@
-name: Build macOS Application
+name: Build Swift macOS Application
 
 on:
   push:
@@ -9,127 +9,179 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
+  build-debug:
+    runs-on: macos-14  # macOS 14 required for the app
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
+    - name: Setup Xcode
+      uses: maxim-lobanov/setup-xcode@v1
       with:
-        node-version: '20.x'
-        cache: 'npm'
+        xcode-version: '15.0'
         
-    - name: Install dependencies
-      run: npm ci
-      
-    - name: Build web application
-      run: npm run build
-      
-    - name: Build macOS app (unsigned)
-      run: npm run electron:build:mac
-      env:
-        CSC_IDENTITY_AUTO_DISCOVERY: false
+    - name: Cache Swift Package Manager
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/Library/Caches/org.swift.swiftpm
+          ~/Library/Developer/Xcode/DerivedData
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+          
+    - name: Create ExportOptions.plist
+      run: |
+        cat > ExportOptions.plist << EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>method</key>
+            <string>mac-application</string>
+            <key>destination</key>
+            <string>export</string>
+        </dict>
+        </plist>
+        EOF
         
-    - name: Upload macOS app (.dmg)
+    - name: Build macOS app (Debug)
+      run: |
+        xcodebuild -project Web.xcodeproj \
+          -scheme Web \
+          -configuration Debug \
+          -destination 'platform=macOS' \
+          -archivePath Web.xcarchive \
+          archive
+          
+    - name: Export app bundle
+      run: |
+        xcodebuild -exportArchive \
+          -archivePath Web.xcarchive \
+          -exportPath ./build \
+          -exportOptionsPlist ExportOptions.plist
+        
+    - name: Upload macOS app bundle
       uses: actions/upload-artifact@v4
       with:
-        name: macos-app-dmg
-        path: dist-electron/*.dmg
-        retention-days: 30
-        
-    - name: Upload macOS app (.app)
-      uses: actions/upload-artifact@v4
-      with:
-        name: macos-app-bundle
-        path: dist-electron/mac/*.app
+        name: Web-macOS-Debug
+        path: build/Web.app
         retention-days: 30
 
-  build-macos-signed:
-    runs-on: macos-latest
+  build-release:
+    runs-on: macos-14
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
+    - name: Setup Xcode
+      uses: maxim-lobanov/setup-xcode@v1
       with:
-        node-version: '20.x'
-        cache: 'npm'
+        xcode-version: '15.0'
         
-    - name: Install dependencies
-      run: npm ci
-      
+    - name: Cache Swift Package Manager
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/Library/Caches/org.swift.swiftpm
+          ~/Library/Developer/Xcode/DerivedData
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+          
     - name: Import Code-Signing Certificates
-      if: env.CSC_LINK != ''
-      uses: Apple-Actions/import-codesign-certs@v2
-      with:
-        p12-file-base64: ${{ secrets.CSC_LINK }}
-        p12-password: ${{ secrets.CSC_KEY_PASSWORD }}
-        
-    - name: Build web application
-      run: npm run build
-      
-    - name: Build and sign macOS app
-      run: npm run electron:build:mac
+      if: env.APPLE_CERTIFICATE_BASE64 != ''
+      run: |
+        echo "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.p12
+        security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+        security default-keychain -s build.keychain
+        security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+        security import certificate.p12 -k build.keychain -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
       env:
-        CSC_LINK: ${{ secrets.CSC_LINK }}
-        CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-        APPLE_ID: ${{ secrets.APPLE_ID }}
-        APPLE_ID_PASS: ${{ secrets.APPLE_ID_PASS }}
-        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+        KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         
-    - name: Upload signed macOS app
+    - name: Create ExportOptions.plist for Release
+      run: |
+        cat > ExportOptions.plist << EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>method</key>
+            <string>mac-application</string>
+            <key>destination</key>
+            <string>export</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>${{ secrets.APPLE_TEAM_ID }}</string>
+        </dict>
+        </plist>
+        EOF
+        
+    - name: Build macOS app (Release)
+      run: |
+        xcodebuild -project Web.xcodeproj \
+          -scheme Web \
+          -configuration Release \
+          -destination 'platform=macOS' \
+          -archivePath Web.xcarchive \
+          archive \
+          CODE_SIGN_IDENTITY="${{ secrets.CODE_SIGN_IDENTITY }}" \
+          DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}"
+          
+    - name: Export signed app bundle
+      run: |
+        xcodebuild -exportArchive \
+          -archivePath Web.xcarchive \
+          -exportPath ./build \
+          -exportOptionsPlist ExportOptions.plist
+          
+    - name: Create DMG
+      run: |
+        mkdir -p dmg
+        cp -R build/Web.app dmg/
+        hdiutil create -volname "Web Browser" -srcfolder dmg -ov -format UDZO Web-Browser.dmg
+        
+    - name: Upload Release Build
       uses: actions/upload-artifact@v4
       with:
-        name: macos-app-signed
-        path: dist-electron/*.dmg
+        name: Web-macOS-Release
+        path: |
+          build/Web.app
+          Web-Browser.dmg
         retention-days: 90
         
-    - name: Create Release
+    - name: Create GitHub Release
       if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          dist-electron/*.dmg
-          dist-electron/*.zip
+          Web-Browser.dmg
         draft: false
         prerelease: false
+        body: |
+          ## Web Browser for macOS
+          
+          ### Requirements
+          - macOS 14.0 or later
+          - Apple Silicon Mac (for AI features)
+          
+          ### Features
+          - Native WebKit rendering
+          - Local AI integration with MLX
+          - Privacy-focused browsing
+          - Built-in ad blocking
+          - Comprehensive keyboard shortcuts
+          
+          ### Installation
+          1. Download the DMG file
+          2. Open the DMG and drag Web.app to Applications
+          3. Launch from Applications folder
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-universal:
-    runs-on: macos-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20.x'
-        cache: 'npm'
-        
-    - name: Install dependencies
-      run: npm ci
-      
-    - name: Build web application
-      run: npm run build
-      
-    - name: Build Universal macOS app
-      run: npm run electron:build:mac:universal
-      env:
-        CSC_IDENTITY_AUTO_DISCOVERY: false
-        
-    - name: Upload Universal macOS app
-      uses: actions/upload-artifact@v4
-      with:
-        name: macos-app-universal
-        path: dist-electron/*.dmg
-        retention-days: 90
