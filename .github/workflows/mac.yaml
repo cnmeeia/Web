@@ -1,38 +1,135 @@
-name: macOS Build
+name: Build macOS Application
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
-    branches: [ master ]
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: macos-14  # Apple Silicon runner (macOS 14)
-
+  build-macos:
+    runs-on: macos-latest
+    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build web application
+      run: npm run build
+      
+    - name: Build macOS app (unsigned)
+      run: npm run electron:build:mac
+      env:
+        CSC_IDENTITY_AUTO_DISCOVERY: false
+        
+    - name: Upload macOS app (.dmg)
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-app-dmg
+        path: dist-electron/*.dmg
+        retention-days: 30
+        
+    - name: Upload macOS app (.app)
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-app-bundle
+        path: dist-electron/mac/*.app
+        retention-days: 30
 
-      - name: Select Xcode 15
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+  build-macos-signed:
+    runs-on: macos-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Import Code-Signing Certificates
+      if: env.CSC_LINK != ''
+      uses: Apple-Actions/import-codesign-certs@v2
+      with:
+        p12-file-base64: ${{ secrets.CSC_LINK }}
+        p12-password: ${{ secrets.CSC_KEY_PASSWORD }}
+        
+    - name: Build web application
+      run: npm run build
+      
+    - name: Build and sign macOS app
+      run: npm run electron:build:mac
+      env:
+        CSC_LINK: ${{ secrets.CSC_LINK }}
+        CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_ID_PASS: ${{ secrets.APPLE_ID_PASS }}
+        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        
+    - name: Upload signed macOS app
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-app-signed
+        path: dist-electron/*.dmg
+        retention-days: 90
+        
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist-electron/*.dmg
+          dist-electron/*.zip
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build macOS App
-        run: |
-          xcodebuild \
-            -project Web/Web.xcodeproj \
-            -scheme Web \
-            -configuration Release \
-            -archivePath build/Web.xcarchive \
-            archive
-
-      - name: Export .app
-        run: |
-          mkdir -p build/App
-          cp -R build/Web.xcarchive/Products/Applications/Web.app build/App/
-
-      - name: Upload .app
-        uses: actions/upload-artifact@v4
-        with:
-          name: Web-macOS-App
-          path: build/App/Web.app
+  build-universal:
+    runs-on: macos-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build web application
+      run: npm run build
+      
+    - name: Build Universal macOS app
+      run: npm run electron:build:mac:universal
+      env:
+        CSC_IDENTITY_AUTO_DISCOVERY: false
+        
+    - name: Upload Universal macOS app
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-app-universal
+        path: dist-electron/*.dmg
+        retention-days: 90
